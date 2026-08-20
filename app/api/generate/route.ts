@@ -1,0 +1,178 @@
+import { INTEGRATIONS, resolveIntegrationNames } from "@/lib/integrations";
+import { buildSystemPrompt } from "@/lib/prompt";
+import { PROMPT_MAX_LENGTH } from "@/lib/validation";
+import { checkRateLimit } from "@/lib/rate-limit";
+import { generatePlan, type FailureKind } from "@/lib/ai";
+
+type ErrorCode =
+  | "invalid_request"
+  | "rate_limited"
+  | "not_configured"
+  | "blocked"
+  | "service_unavailable"
+  | "timeout"
+  | "empty_response"
+  | "server_error";
+
+/** Every message here is written by us, so it is always safe to show the user. */
+function fail(
+  code: ErrorCode,
+  message: string,
+  status: number,
+  retryAfterSeconds?: number,
+) {
+  return Response.json(
+    { error: message, code },
+    {
+      status,
+      headers: retryAfterSeconds
+        ? { "Retry-After": String(retryAfterSeconds) }
+        : undefined,
+    },
+  );
+}
+
+export async function POST(request: Request) {
+  // Deliberately before parsing: an unauthenticated endpoint that spends money
+  // should not do work for a client that is already over its limit.
+  const { allowed, retryAfterSeconds } = checkRateLimit(getClientKey(request));
+  if (!allowed) {
+    return fail(
+      "rate_limited",
+      `Too many requests. Try again in ${retryAfterSeconds}s.`,
+      429,
+      retryAfterSeconds,
+    );
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return fail("invalid_request", "Request body must be valid JSON.", 400);
+  }
+
+  const parsed = parseBody(body);
+  if ("error" in parsed) {
+    return fail("invalid_request", parsed.error, 400);
+  }
+
+  const result = await generatePlan({
+    // Trusted, server-built instructions — the only dynamic values are
+    // integration names that already passed the allowlist.
+    systemPrompt: buildSystemPrompt(parsed.integrationNames),
+    // The user's raw text, kept on the content channel for both providers.
+    userPrompt: parsed.prompt,
+  });
+
+  if (!result.ok) {
+    return failFromProvider(result.kind, result.retryAfterSeconds);
+  }
+
+  console.info("Plan generated.", { provider: result.provider });
+  // The browser has no use for the provider name, so it is not sent.
+  return Response.json({ text: result.text });
+}
+
+/** Provider-neutral failures become the HTTP contract the browser already knows. */
+function failFromProvider(kind: FailureKind, retryAfterSeconds?: number) {
+  switch (kind) {
+    case "not_configured":
+      return fail(
+        "not_configured",
+        "The server's AI provider is not configured correctly. Please contact the site owner.",
+        500,
+      );
+    case "rate_limited":
+      return fail(
+        "rate_limited",
+        "The AI service request limit has been reached. Please try again later.",
+        429,
+        retryAfterSeconds,
+      );
+    case "unavailable":
+      return fail(
+        "service_unavailable",
+        "The AI service is temporarily unavailable. Please try again in a moment.",
+        503,
+      );
+    case "timeout":
+      return fail(
+        "timeout",
+        "The AI service took too long to respond. Please try again.",
+        504,
+      );
+    case "blocked":
+      return fail(
+        "blocked",
+        "The safety filter blocked this request. Try rephrasing your description.",
+        422,
+      );
+    case "empty_response":
+      return fail(
+        "empty_response",
+        "The model did not return a usable response. Please try again.",
+        502,
+      );
+    default:
+      return fail(
+        "server_error",
+        "Something went wrong generating your plan. Please try again.",
+        500,
+      );
+  }
+}
+
+type ParsedBody =
+  | { prompt: string; integrationNames: string[] }
+  | { error: string };
+
+function parseBody(body: unknown): ParsedBody {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return { error: "Request body must be a JSON object." };
+  }
+
+  const { prompt, integrations } = body as Record<string, unknown>;
+
+  if (typeof prompt !== "string") {
+    return { error: "`prompt` is required and must be a string." };
+  }
+
+  const trimmedPrompt = prompt.trim();
+  if (trimmedPrompt.length === 0) {
+    return { error: "Please describe what you want to build." };
+  }
+  if (trimmedPrompt.length > PROMPT_MAX_LENGTH) {
+    return {
+      error: `Your description is too long. Please keep it to ${PROMPT_MAX_LENGTH} characters or fewer.`,
+    };
+  }
+
+  // An omitted `integrations` field means "none selected"; anything present must be an array.
+  if (integrations !== undefined && !Array.isArray(integrations)) {
+    return { error: "`integrations` must be an array of integration ids." };
+  }
+
+  const ids = integrations ?? [];
+  if (!ids.every((id): id is string => typeof id === "string")) {
+    return { error: "`integrations` must contain only strings." };
+  }
+
+  const resolved = resolveIntegrationNames(ids);
+  if (!resolved.ok) {
+    return {
+      error: `Unknown integration${resolved.unknownIds.length > 1 ? "s" : ""}. Choose from: ${INTEGRATIONS.map((i) => i.id).join(", ")}.`,
+    };
+  }
+
+  return { prompt: trimmedPrompt, integrationNames: resolved.names };
+}
+
+/**
+ * Best-effort client identity for rate limiting. x-forwarded-for is spoofable, so
+ * this raises the cost of casual abuse rather than preventing it. See DECISIONS.md.
+ */
+function getClientKey(request: Request): string {
+  const forwardedFor = request.headers.get("x-forwarded-for");
+  return forwardedFor?.split(",")[0]?.trim() || "unknown";
+}

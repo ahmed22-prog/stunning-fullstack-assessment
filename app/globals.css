@@ -1,26 +1,64 @@
 @import "tailwindcss";
 
+/*
+  One deliberate dark theme — no toggle. All colours live here as tokens so the
+  page reads as a designed surface rather than assorted Tailwind defaults.
+*/
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --canvas: #0a0a0c;
+  --surface: #121216;
+  --surface-raised: #17171d;
+  --border: #26262e;
+  --border-strong: #35353f;
+  --ink: #f4f4f5;
+  --ink-muted: #a1a1aa;
+  /* Lightened from #71717a, which measured 3.7:1 on raised surfaces. This clears
+     WCAG AA (>= 5.3:1 on every surface here) and stays below --ink-muted. */
+  --ink-subtle: #8b8b96;
+  --accent: #f97362;
+  --accent-ink: #1a0d0a;
+  --danger: #f87171;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-border-subtle: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-subtle: var(--ink-subtle);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-danger: var(--danger);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--canvas);
+  color: var(--ink);
+}
+
+/* One consistent focus ring across every interactive element. The ring follows
+   each element's own corner radius, so nothing changes shape when focused. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Keep the loading feedback legible without the motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
