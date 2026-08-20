@@ -1,12 +1,3 @@
-/**
- * System-prompt construction.
- *
- * Everything in here is trusted, server-generated text. The only dynamic values
- * are integration display names that have already been resolved against the
- * allowlist in lib/integrations.ts. The user's own text never reaches this file —
- * it is sent as the user message instead.
- */
-
 export function buildSystemPrompt(integrationNames: string[]): string {
   return [
     "You are the build planner for Stunning, a tool that turns a short product description into a concrete implementation plan.",
@@ -45,8 +36,6 @@ function integrationContext(integrationNames: string[]): string {
     ].join("\n");
   }
 
-  // "available for this build context", not "connected" — nothing is wired to a
-  // real third-party API, and the page tells the user exactly that.
   return [
     "The following integrations are available for this build context. Plan the product around them where they genuinely fit:",
     ...integrationNames.map((name) => `- ${name}`),

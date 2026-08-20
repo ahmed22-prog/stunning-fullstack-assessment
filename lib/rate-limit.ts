@@ -1,11 +1,3 @@
-/**
- * Minimal in-memory, per-IP rate limiter.
- *
- * This exists because /api/generate is an unauthenticated endpoint that spends
- * money on every call. It is deliberately the cheapest thing that raises the
- * cost of casual abuse — it is NOT production-grade. See DECISIONS.md.
- */
-
 const WINDOW_MS = 60_000;
 const MAX_REQUESTS_PER_WINDOW = 10;
 
@@ -26,7 +18,7 @@ export function checkRateLimit(key: string): { allowed: boolean; retryAfterSecon
   recent.push(now);
   hits.set(key, recent);
 
-  // Cheap bound on memory: drop keys that have gone quiet.
+  // Stops the Map growing forever: once it's big, drop keys that went quiet.
   if (hits.size > 5000) {
     for (const [otherKey, timestamps] of hits) {
       if (timestamps.every((at) => at <= cutoff)) hits.delete(otherKey);

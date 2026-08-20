@@ -88,7 +88,6 @@ export default function Home() {
       await navigator.clipboard.writeText(result);
       setCopyState("copied");
     } catch {
-      // Clipboard access can be blocked (insecure context, permissions).
       setCopyState("failed");
     }
     window.setTimeout(() => setCopyState("idle"), 2000);
@@ -96,7 +95,6 @@ export default function Home() {
 
   return (
     <div className="relative flex min-h-full flex-col overflow-x-hidden">
-      {/* One soft light source behind the composer - the only decorative element. */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-x-0 top-0 h-[420px] bg-[radial-gradient(60%_100%_at_50%_0%,rgba(249,115,98,0.14),transparent_70%)]"
@@ -228,7 +226,6 @@ export default function Home() {
           </button>
         </section>
 
-        {/* Async feedback lives in one polite live region so it is announced once. */}
         <section aria-live="polite" className="mt-8">
           {status === "loading" && <LoadingPanel />}
 
@@ -240,9 +237,8 @@ export default function Home() {
               <p className="mt-1.5 text-sm leading-relaxed text-ink-muted [overflow-wrap:anywhere]">
                 {error}
               </p>
-              {/* Offered only when trying again could actually succeed — an
-                  exhausted quota or a server misconfiguration will not clear
-                  because the user clicked a button. */}
+              {/* Hidden for errors a retry can't fix, like an exhausted quota
+                  or a server that isn't configured. */}
               {canRetry && (
                 <button
                   type="button"
@@ -354,7 +350,6 @@ function Spinner({ className = "" }: { className?: string }) {
   );
 }
 
-/** Success bodies are `{ text: string }`; anything else counts as a failure. */
 function readText(data: unknown): string {
   if (data && typeof data === "object") {
     const { text } = data as { text?: unknown };
@@ -363,7 +358,6 @@ function readText(data: unknown): string {
   return "";
 }
 
-/** Error bodies are `{ error: string }`; fall back if we get anything else. */
 function readError(data: unknown): string {
   if (data && typeof data === "object") {
     const { error } = data as { error?: unknown };
@@ -372,7 +366,6 @@ function readError(data: unknown): string {
   return "Something went wrong. Please try again.";
 }
 
-/** Error bodies also carry `{ code }`, which decides whether retrying is useful. */
 function readCode(data: unknown): string {
   if (data && typeof data === "object") {
     const { code } = data as { code?: unknown };
@@ -381,7 +374,6 @@ function readCode(data: unknown): string {
   return "";
 }
 
-/** Anything a user can fix by waiting a moment and clicking once more. */
 function isRetryable(code: string): boolean {
   return !["rate_limited", "not_configured", "blocked", "invalid_request"].includes(
     code,

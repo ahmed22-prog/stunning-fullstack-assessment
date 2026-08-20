@@ -1,71 +1,109 @@
 # Technology: OpenAI GPT-5.6 via the Responses API
 
+I picked this because it's what this project actually runs on, so I can talk
+about it from experience rather than from documentation.
+
 ## What is it?
 
-The Responses API is OpenAI's current server-side interface for generating model
-output. It replaces the older Chat Completions shape — instead of assembling a
-`messages` array where the system prompt is just the first element, a request has
-two distinct fields: `instructions` for the developer's own instructions, and
-`input` for the end user's content. Built-in tools (web search, file search, code
-interpreter) and multi-turn state are first-class parameters rather than things
-you wire up yourself. GPT-5.6 is the current model family on top of it, split
-into variants that trade cost against reasoning depth — this project defaults to
-`gpt-5.6-terra`, which is a good fit for short, structured generation where I
-want solid reasoning but do not need the highest-cost coding model.
+The Responses API is OpenAI's current interface for generating model output. The
+older Chat Completions style put everything into one `messages` array, where the
+system prompt was just the first item in the list. The Responses API splits that
+into two separate fields: `instructions` for the developer's rules and `input`
+for the user's content. Tools like web search and file search, and multi-turn
+state, are proper parameters instead of things you wire up by hand.
 
-The practical difference for this project is the field split. A single call looks
-like `openai.responses.create({ model, instructions, input })`, and
-`response.output_text` gives the text back. That separation is not just tidier —
-it is the boundary I rely on for prompt security.
+GPT-5.6 is the current model family. The variants trade cost against how much the
+model reasons before answering. I default to `gpt-5.6-terra`, which is a good fit
+for short structured output where I want decent reasoning but don't need the most
+expensive model.
+
+One call looks like this:
+
+```ts
+const response = await openai.responses.create({
+  model: "gpt-5.6-terra",
+  instructions: systemPrompt,  // my rules
+  input: userPrompt,           // what the user typed
+});
+
+const text = response.output_text;
+```
+
+The field split is the part I care about most. It isn't just tidier, it's the
+boundary this whole app's prompt security is built on. My instructions and
+untrusted user text never share a channel.
 
 ## How could Stunning use it?
 
-This app *is* the smallest version of the use case: turn a short product
-description plus a set of selected capabilities into a structured plan. The same
-call shape scales up in a few directions that matter for a product like Stunning.
-Prompt-driven planning is the obvious one — the `instructions`/`input` split maps
-exactly onto "our product rules" versus "what this user typed", which is what
-lets me safely put user text near a system prompt at all. Beyond planning, the
-built-in tool calling is what turns a planner into a builder: the same request
-can be given tools that scaffold a project, write files, or query real data,
-without the app hand-rolling an agent loop. And because the API supports
-structured output, the free-text plan this app renders today could become typed
-JSON that drives real UI — sections, feature lists, and integration mappings as
-data instead of text a human has to re-read.
+This app is the smallest version of the use case: take a short description and
+turn it into a structured plan. It scales in a few directions that matter for a
+product like Stunning.
+
+**Prompt-driven planning** is what's here already. The `instructions` / `input`
+split maps directly onto "our product's rules" versus "what this user typed",
+which is what makes it safe to put user text anywhere near a system prompt.
+
+**Tool calling** is what turns a planner into a builder. The same call can be
+given tools that scaffold a project, write files, or look up real data, without
+the app hand-rolling an agent loop.
+
+**Structured output** means the plan could come back as typed JSON instead of
+text. Right now I render a paragraph the user has to read. Instead I could get
+back something like:
+
+```json
+{ "features": ["plan selection", "monthly billing"], "integrations": ["Stripe"] }
+```
+
+and render each item as its own card, or use it to drive real UI.
 
 ## What are its limitations?
 
-Cost is per token and rises with reasoning depth, so a feature like this has a
-unit economic attached to every click — which is exactly why this app's biggest
-production risk is unauthenticated spend rather than anything about the model.
-Rate limits and spend caps are set per account and per model, and they are an
-external dependency I do not control: I hit real quota exhaustion while testing
-this project, on both vendors. Latency is the next constraint — a reasoning model
-takes seconds, not milliseconds, which is why this app has a hard time budget and
-a skeleton state rather than a spinner and hope. Output is nondeterministic, so
-two identical requests give different plans, and prompt behaviour shifts when
-models are updated or retired; a prompt tuned today is not guaranteed to behave
-identically in six months, which argues for pinning model versions and keeping
-the prompt in one testable place. Finally, the fallback I added is itself a
-limitation: it buys availability, but it doubles the vendor surface and means the
-same request can be served by a different model with different characteristics.
+**Cost.** You pay per token, so every click has a price. That's exactly why the
+biggest production risk in DECISIONS.md is spend, not the model.
 
-## Would I use it today? Why or why not?
+**Rate limits and quotas are outside my control.** They're set per account and
+per model. I hit real quota exhaustion on both providers while building this,
+which is also why the error handling separates "you've hit a limit" from "the
+service is down".
 
-Yes — for this use case, as the primary provider, with server-side controls
-around it. It is the right tool when the job is "turn unstructured text into
-structured output" and the value comes from reasoning quality rather than raw
-throughput. I would not use it without the things this project already does:
-credentials server-side only, an allowlist between user input and the system
-prompt, independent request validation, a bounded timeout, and normalised errors
-so provider problems never reach the browser raw.
+**Latency is in seconds, not milliseconds.** A reasoning model takes a while.
+That's why this app has a hard time budget and a skeleton state instead of a
+spinner and hope.
 
-What I would add before it carried real traffic is the list in DECISIONS.md —
-authentication, per-account quotas, and hard spend caps at the provider — because
-the model is not the risk, the unmetered access to it is. Where I would *not*
-reach for it is anything latency-critical or extremely high-volume with a
-mechanical transformation at its core; there a smaller, cheaper, faster model, or
-plain code, wins. The fallback to Gemini is worth it here specifically because
-availability matters more than perfect output consistency for this feature — for
-a feature where consistency mattered more, I would drop the fallback and let it
-fail cleanly instead.
+**Output is nondeterministic.** Two identical requests give two different plans.
+The shape stays the same but the wording doesn't, so anything downstream has to
+tolerate that.
+
+**Model behaviour moves.** Models get updated and retired, and a prompt tuned
+today isn't guaranteed to behave the same in six months. I actually ran into a
+retired model during this project. It argues for pinning model versions and
+keeping the prompt in one place you can test.
+
+**The fallback is its own limitation.** It buys availability, but it doubles the
+vendor surface and means the same request can be served by a different model with
+different output characteristics.
+
+## Would I use it today?
+
+Yes, as the primary provider, for this kind of job, with server-side controls
+around it. It's the right tool when the work is turning unstructured text into
+structured output and the value comes from reasoning quality rather than raw
+speed or volume.
+
+I wouldn't use it without the things this project already has: keys server-side
+only, an allowlist between user input and the prompt, validation that runs
+independently on the server, a bounded timeout, and normalised errors so provider
+problems never reach the browser raw.
+
+Before it carried real traffic I'd add what's listed in DECISIONS.md:
+authentication, per-account quotas, and hard spend caps at the provider. The
+model isn't the risk. Unmetered access to it is.
+
+Where I wouldn't reach for it is anything latency-critical, or very high volume
+where the actual work is a mechanical transformation. There a smaller and cheaper
+model, or just plain code, wins easily.
+
+The Gemini fallback is worth it here because for this feature availability
+matters more than perfectly consistent output. If consistency mattered more, I'd
+drop the fallback and let it fail cleanly instead.

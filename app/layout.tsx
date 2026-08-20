@@ -19,8 +19,6 @@ export const metadata: Metadata = {
     "Describe what you want to build, pick your integrations, and get a concrete implementation plan.",
 };
 
-// Typed explicitly rather than with Next's generated `LayoutProps<"/">`, so that
-// `npm run typecheck` works on a fresh clone without a prior build.
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html

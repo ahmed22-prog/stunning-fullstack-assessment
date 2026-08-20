@@ -1,15 +1,3 @@
-/**
- * Plan generation: OpenAI primary, Gemini fallback.
- *
- * This is deliberately two functions and a chooser, not a provider framework.
- * Both providers receive the *same* system prompt from lib/prompt.ts, and both
- * keep the same boundary: trusted server-built instructions go on the provider's
- * instruction channel, the user's raw text goes on the content channel.
- *
- * Fallback exists to survive a provider being unavailable. It must never hide a
- * broken configuration or a safety decision — see FALLBACK_ELIGIBLE below.
- */
-
 import { ApiError as GeminiApiError, GoogleGenAI } from "@google/genai";
 import {
   APIConnectionError,
@@ -23,19 +11,15 @@ const DEFAULT_OPENAI_MODEL = "gpt-5.6-terra";
 const DEFAULT_GEMINI_MODEL = "gemini-3.6-flash";
 const MAX_OUTPUT_TOKENS = 4096;
 
-/**
- * One wall-clock ceiling for the whole request, split so that a slow primary can
- * never turn into "30s of OpenAI + 30s of Gemini". The primary gets a fixed
- * slice; the fallback gets whatever is left of the total.
- */
+// One ceiling for the whole request. OpenAI gets 30s and the fallback gets
+// what's left, so adding a second provider can't double how long a user waits.
 const TOTAL_BUDGET_MS = 50_000;
 const PRIMARY_BUDGET_MS = 30_000;
-/** Below this there is no point starting a fallback — it would only add waiting. */
+// Below this a fallback can't realistically finish, so we don't start one.
 const MIN_FALLBACK_BUDGET_MS = 10_000;
 
 export type ProviderName = "openai" | "gemini";
 
-/** Why an attempt failed, normalised so the route never inspects an SDK error. */
 export type FailureKind =
   | "not_configured"
   | "rate_limited"
@@ -45,19 +29,10 @@ export type FailureKind =
   | "empty_response"
   | "unknown";
 
-/**
- * The whole fallback policy, in one line.
- *
- * Included: the provider is up but cannot serve us right now.
- * Excluded on purpose:
- *   not_configured — a bad key or a retired model is our bug; falling back would
- *                    hide a broken deployment behind a working one.
- *   blocked        — re-sending blocked content to a second provider is shopping
- *                    for a safety verdict we already got.
- *   empty_response — not an availability failure, and paying a second provider
- *                    for an ambiguous result is not worth the cost.
- *   unknown        — if we cannot name the failure we cannot call it transient.
- */
+// Only fall back when the provider is up but can't serve us right now.
+// not_configured, blocked, empty_response and unknown are left out on purpose:
+// swapping providers there hides a bug or second-guesses a safety decision
+// instead of fixing anything.
 const FALLBACK_ELIGIBLE: readonly FailureKind[] = [
   "rate_limited",
   "unavailable",
@@ -73,9 +48,7 @@ export type GenerationResult =
   | { ok: false; kind: FailureKind; retryAfterSeconds?: number };
 
 export type GenerationInput = {
-  /** Trusted, server-built. Never contains user text. */
   systemPrompt: string;
-  /** The user's raw text. Never reaches an instruction channel. */
   userPrompt: string;
 };
 
@@ -125,13 +98,8 @@ export async function generatePlan(
     primary_failure: primary.kind,
     fallback_failure: fallback.kind,
   });
-  // Report the last thing we actually tried, so the message matches reality.
   return fallback;
 }
-
-/* -------------------------------------------------------------------------- */
-/* OpenAI — primary                                                           */
-/* -------------------------------------------------------------------------- */
 
 async function callOpenAI(
   { systemPrompt, userPrompt }: GenerationInput,
@@ -151,9 +119,8 @@ async function callOpenAI(
         input: userPrompt,
         max_output_tokens: MAX_OUTPUT_TOKENS,
       },
-      // No SDK retries: a whole second provider stands behind this one, so
-      // retrying here would only delay reaching it. `timeout` is per attempt,
-      // which is exactly the primary's slice of the budget.
+      // No SDK retries on purpose: Gemini is the retry. The SDK timeout is per
+      // attempt, so retrying here would also push us past the total budget.
       { timeout: budgetMs, maxRetries: 0 },
     );
 
@@ -179,7 +146,6 @@ async function callOpenAI(
   }
 }
 
-/** A refusal part, or a response cut short by the content filter. */
 function isOpenAiBlocked(response: OpenAI.Responses.Response): boolean {
   if (response.incomplete_details?.reason === "content_filter") return true;
   return response.output.some(
@@ -189,13 +155,11 @@ function isOpenAiBlocked(response: OpenAI.Responses.Response): boolean {
   );
 }
 
-/**
- * `output_text` is the convenience field; assembling it from the output parts is
- * the documented fallback and costs six lines, so we do not depend on it alone.
- */
 function readOpenAiText(response: OpenAI.Responses.Response): string {
   if (response.output_text?.trim()) return response.output_text.trim();
 
+  // output_text is a convenience field. Rebuilding it from the output parts is
+  // the documented fallback, and it's cheap enough not to depend on one field.
   return response.output
     .flatMap((item) => (item.type === "message" ? item.content : []))
     .map((part) => (part.type === "output_text" ? part.text : ""))
@@ -206,7 +170,6 @@ function readOpenAiText(response: OpenAI.Responses.Response): string {
 function classifyOpenAiError(error: unknown): Attempt {
   logProviderError("openai", error);
 
-  // APIConnectionTimeoutError extends APIConnectionError, so it is checked first.
   if (
     error instanceof APIConnectionTimeoutError ||
     error instanceof APIUserAbortError
@@ -218,7 +181,8 @@ function classifyOpenAiError(error: unknown): Attempt {
   }
   if (error instanceof OpenAIApiError) {
     const status = error.status;
-    // A rejected key or a model this account cannot reach is our bug to fix.
+    // Bad key, or a model this account can't reach. That's our bug to fix, and
+    // 404 lands here so a retired model name doesn't read as a random failure.
     if (status === 401 || status === 403 || status === 404) {
       return { ok: false, kind: "not_configured" };
     }
@@ -236,7 +200,6 @@ function classifyOpenAiError(error: unknown): Attempt {
   return { ok: false, kind: "unknown" };
 }
 
-/** Only trust a delay the provider actually told us. Never invent one. */
 function readRetryAfter(headers: Headers | undefined): number | undefined {
   const raw = headers?.get("retry-after");
   if (!raw) return undefined;
@@ -245,10 +208,6 @@ function readRetryAfter(headers: Headers | undefined): number | undefined {
     ? Math.ceil(seconds)
     : undefined;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Gemini — fallback                                                          */
-/* -------------------------------------------------------------------------- */
 
 async function callGemini(
   { systemPrompt, userPrompt }: GenerationInput,
@@ -264,23 +223,21 @@ async function callGemini(
       config: {
         systemInstruction: systemPrompt,
         maxOutputTokens: MAX_OUTPUT_TOKENS,
-        // Bounds the whole call, retries included.
         abortSignal: AbortSignal.timeout(budgetMs),
         httpOptions: {
-          // 429 is deliberately absent from this list. The SDK retries it by
-          // default, but an exhausted quota is not transient — retrying it just
-          // spends the fallback's budget on a failure we already know about.
           retryOptions: {
             attempts: 2,
             initialDelay: 0.5,
             maxDelay: 2,
+            // 429 is missing here on purpose. The SDK retries it by default,
+            // but an exhausted quota isn't transient, so those retries just
+            // spend the remaining budget on a failure we already know about.
             httpStatusCodes: [500, 502, 503, 504],
           },
         },
       },
     });
 
-    // Gemini can return 200 with no text when a prompt or answer is filtered.
     const blockReason =
       response.promptFeedback?.blockReason ??
       finishReasonIfBlocked(response.candidates?.[0]?.finishReason);
@@ -303,7 +260,8 @@ async function callGemini(
   }
 }
 
-/** `STOP` and `MAX_TOKENS` are normal endings; the rest mean content was withheld. */
+// STOP and MAX_TOKENS are normal endings. Any other reason means Gemini
+// withheld the content, which is a different problem than a failed request.
 function finishReasonIfBlocked(finishReason: string | undefined) {
   if (!finishReason) return undefined;
   return ["STOP", "MAX_TOKENS", "FINISH_REASON_UNSPECIFIED"].includes(
@@ -325,7 +283,6 @@ function classifyGeminiError(error: unknown): Attempt {
       return { ok: false, kind: "unavailable" };
     }
   }
-  // The SDK surfaces aborts and dropped connections as plain Errors.
   if (error instanceof Error && /abort|timeout/i.test(error.message)) {
     return { ok: false, kind: "timeout" };
   }
@@ -335,12 +292,6 @@ function classifyGeminiError(error: unknown): Attempt {
   return { ok: false, kind: "unknown" };
 }
 
-/* -------------------------------------------------------------------------- */
-
-/**
- * A compact, greppable summary — never the whole SDK error object, and never
- * anything derived from the API key.
- */
 function logProviderError(provider: ProviderName, error: unknown) {
   const status = error instanceof OpenAIApiError ? error.status : undefined;
   console.error(`provider=${provider} request failed.`, {

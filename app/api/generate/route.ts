@@ -14,7 +14,6 @@ type ErrorCode =
   | "empty_response"
   | "server_error";
 
-/** Every message here is written by us, so it is always safe to show the user. */
 function fail(
   code: ErrorCode,
   message: string,
@@ -33,8 +32,6 @@ function fail(
 }
 
 export async function POST(request: Request) {
-  // Deliberately before parsing: an unauthenticated endpoint that spends money
-  // should not do work for a client that is already over its limit.
   const { allowed, retryAfterSeconds } = checkRateLimit(getClientKey(request));
   if (!allowed) {
     return fail(
@@ -58,10 +55,7 @@ export async function POST(request: Request) {
   }
 
   const result = await generatePlan({
-    // Trusted, server-built instructions — the only dynamic values are
-    // integration names that already passed the allowlist.
     systemPrompt: buildSystemPrompt(parsed.integrationNames),
-    // The user's raw text, kept on the content channel for both providers.
     userPrompt: parsed.prompt,
   });
 
@@ -69,12 +63,12 @@ export async function POST(request: Request) {
     return failFromProvider(result.kind, result.retryAfterSeconds);
   }
 
+  // Which provider answered is useful in the logs, but the browser doesn't
+  // need it, so it stays out of the response body.
   console.info("Plan generated.", { provider: result.provider });
-  // The browser has no use for the provider name, so it is not sent.
   return Response.json({ text: result.text });
 }
 
-/** Provider-neutral failures become the HTTP contract the browser already knows. */
 function failFromProvider(kind: FailureKind, retryAfterSeconds?: number) {
   switch (kind) {
     case "not_configured":
@@ -148,7 +142,6 @@ function parseBody(body: unknown): ParsedBody {
     };
   }
 
-  // An omitted `integrations` field means "none selected"; anything present must be an array.
   if (integrations !== undefined && !Array.isArray(integrations)) {
     return { error: "`integrations` must be an array of integration ids." };
   }
@@ -168,10 +161,6 @@ function parseBody(body: unknown): ParsedBody {
   return { prompt: trimmedPrompt, integrationNames: resolved.names };
 }
 
-/**
- * Best-effort client identity for rate limiting. x-forwarded-for is spoofable, so
- * this raises the cost of casual abuse rather than preventing it. See DECISIONS.md.
- */
 function getClientKey(request: Request): string {
   const forwardedFor = request.headers.get("x-forwarded-for");
   return forwardedFor?.split(",")[0]?.trim() || "unknown";

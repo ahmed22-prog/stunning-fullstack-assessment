@@ -1,83 +1,77 @@
 # Stunning — Build Plan Generator
 
-## Overview
+Describe something you want to build, optionally pick which services it should
+use, and an AI model writes you a build plan: a summary, core features, an
+integration plan, and a first milestone.
 
-A single-page app where you describe something you want to build, optionally
-select which integrations it should use, and get an AI-generated implementation
-plan: a summary, core features, an integration plan, and a first milestone.
-
-The five integrations (Stripe, Shopify, Gmail, Slack, Google Sheets) are
-**context only** — selecting them changes the instructions sent to the model.
-Nothing connects to a real third-party API.
+The five integrations (Stripe, Shopify, Gmail, Slack, Google Sheets) are context
+only. Picking them changes the instructions sent to the model. Nothing connects
+to a real third-party API.
 
 ## Stack
 
 - Next.js 16 (App Router) + React 19
 - TypeScript
 - Tailwind CSS v4
-- `openai` — **primary** provider, server-side only
-- `@google/genai` — **fallback** provider, server-side only
+- `openai` for the primary provider, `@google/genai` for the fallback (both server-side)
 
-## Providers
+## How the two providers work
 
-OpenAI is always attempted first. Gemini runs only when the OpenAI attempt fails
-for an *operational availability* reason — rate limit, 5xx, timeout, or a network
-failure. It is never used to paper over a configuration problem (missing key,
-401, 403, retired model) or a safety block, because hiding those behind a working
-second provider would leave a broken deployment looking healthy.
+OpenAI is always tried first. Gemini only runs if the OpenAI call fails because
+the service wasn't available: a rate limit, a 5xx, a timeout, or a network error.
 
-Gemini is optional. Without `GEMINI_API_KEY` the app still works; an OpenAI
-outage simply surfaces as an error instead of falling back.
+It does **not** fall back when the key is missing or rejected, when the model
+name is wrong, or when content was blocked for safety. Those are either my bug
+or a decision I shouldn't work around, and hiding them behind a second provider
+means nobody finds out.
 
-## Prerequisites
+Gemini is optional. Without a Gemini key the app still works, an OpenAI outage
+just shows an error instead.
 
-- Node.js 20.9+ (Next.js 16 requirement; developed on 22.x)
+## What you need
+
+- Node.js 20.9+ (Next.js 16 needs it; I used 22.x)
 - npm
-- An OpenAI API key — <https://platform.openai.com/api-keys>
-- Optionally a Gemini API key for the fallback — <https://aistudio.google.com/apikey>
+- An OpenAI API key: https://platform.openai.com/api-keys
+- Optionally a Gemini key for the fallback: https://aistudio.google.com/apikey
 
-Both providers are paid, metered services. Rate limits, request/day quotas, and
-spend caps vary by account, model, and plan, and they change over time — an API
-key may also require billing to be enabled separately. If you see a rate-limit
-error, check the provider's console rather than assuming the app is broken.
+Both are paid APIs. Rate limits, per-day quotas and spend caps depend on your
+account and plan and they change over time, and some keys need billing switched
+on separately. If you get a rate-limit error, check the provider's console
+before assuming the app is broken.
 
-## Installation
+## Setup
 
 ```bash
 npm install
-```
-
-## Environment setup
-
-Copy the template and fill in your keys:
-
-```bash
 cp .env.example .env.local
 ```
 
+Then fill in `.env.local`:
+
 ```env
-# Primary provider — OpenAI. Required.
+# Primary provider
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-5.6-terra
 
-# Fallback provider — Gemini. Optional.
+# Fallback provider (optional)
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-3.6-flash
 ```
 
-Both `*_MODEL` variables are optional and fall back to the defaults above.
-No variable is prefixed with `NEXT_PUBLIC_`, so none is ever sent to the browser.
-`.env.local` is git-ignored.
+Both model variables are optional and fall back to the values above. Nothing is
+prefixed with `NEXT_PUBLIC_`, so no key ever reaches the browser. `.env.local` is
+git-ignored.
 
-## Running locally
+## Run it
 
 ```bash
 npm run dev
 ```
 
-Open <http://localhost:3000>.
+Then open http://localhost:3000.
 
-## Verification
+## Checks
 
 ```bash
 npm run lint
@@ -85,54 +79,50 @@ npm run typecheck
 npm run build
 ```
 
-All three work on a fresh clone, in any order — none of them depends on a
-previous dev-server run.
+These work on a fresh clone in any order. None of them needs you to have run the
+dev server first.
 
-## How it works
+## Request flow
 
 ```text
-Browser (app/page.tsx)
-  → POST /api/generate  { prompt, integrations: string[] }
-  → validate prompt (required, trimmed, <= 2000 chars)
-  → map integration ids against the server-side allowlist (lib/integrations.ts)
-  → build one system prompt from trusted integration names (lib/prompt.ts)
-  → lib/ai.ts: OpenAI first — trusted prompt as `instructions`, user text as `input`
-        └ on an operational failure only → Gemini with the remaining time budget
-  → normalise the response and any errors
-  → JSON back to the browser  { text } | { error, code }
-  → rendered as plain text
+browser (app/page.tsx)
+  POST /api/generate  { prompt, integrations: ["stripe", "gmail"] }
+    validate the prompt (required, trimmed, max 2000 chars)
+    resolve the integration ids against the allowlist (lib/integrations.ts)
+    build one system prompt from the resolved names (lib/prompt.ts)
+    lib/ai.ts: OpenAI first, Gemini only on an availability failure
+    turn the result or the error into JSON
+  { text } or { error, code }
+  rendered as plain text
 ```
 
-Files:
+| Path                        | What it does                                          |
+| --------------------------- | ----------------------------------------------------- |
+| `app/page.tsx`              | The whole UI, state, client validation, request        |
+| `app/api/generate/route.ts` | Parsing, server validation, mapping errors to HTTP     |
+| `lib/ai.ts`                 | Both provider calls and the fallback rule              |
+| `lib/integrations.ts`       | The id to display-name allowlist                       |
+| `lib/prompt.ts`             | Builds the system prompt (server only)                 |
+| `lib/validation.ts`         | The prompt length limit, shared by client and server   |
+| `lib/rate-limit.ts`         | In-memory per-IP limiter                               |
 
-| Path                        | Responsibility                                              |
-| --------------------------- | ----------------------------------------------------------- |
-| `app/page.tsx`              | All UI, state, client-side validation, request lifecycle     |
-| `app/api/generate/route.ts` | Parsing, server validation, HTTP error mapping               |
-| `lib/ai.ts`                 | OpenAI primary, Gemini fallback, provider error normalisation |
-| `lib/integrations.ts`       | The trusted id → display-name allowlist                      |
-| `lib/prompt.ts`             | System-prompt construction (server-only, one copy)           |
-| `lib/validation.ts`         | The prompt length limit, shared by client and server         |
-| `lib/rate-limit.ts`         | In-memory per-IP request limiter                             |
+## Notes on security
 
-## Security notes
-
-- **Server-only credentials.** Both keys are read from `process.env` inside
-  server code. There is no `NEXT_PUBLIC_*` variable and the browser never talks
-  to a provider directly.
-- **Independent server-side validation.** The client disables invalid
-  submissions, and the route re-checks everything: JSON parses, body is an
-  object, `prompt` is a non-empty trimmed string within the limit,
-  `integrations` is an array of strings. No provider is called until it passes.
-- **Integration allowlisting.** The client sends ids. The server resolves each
-  id against `INTEGRATIONS` and only ever interpolates the display name it owns.
-  An unrecognised id fails the request with a `400`, so an arbitrary string can
-  never reach the prompt.
-- **Prompt boundary, identically for both providers.** Trusted, server-generated
-  instructions go in OpenAI's `instructions` and Gemini's `systemInstruction`.
-  The user's raw text goes in OpenAI's `input` and Gemini's `contents`.
-- **Safe output rendering.** The response is rendered as a text node with
-  `white-space: pre-wrap`. No `dangerouslySetInnerHTML`, no Markdown renderer.
-- **No leaked internals.** Provider errors are logged server-side as a compact
-  summary and replaced with fixed, user-safe messages — no stack traces, SDK
-  objects, or env values.
+- **Keys stay on the server.** Both are read from `process.env` in server code.
+  There's no `NEXT_PUBLIC_*` variable and the browser never calls a provider.
+- **The server validates on its own.** The client disables bad submissions, and
+  the route checks everything again: valid JSON, body is an object, prompt is a
+  non-empty string within the limit, integrations is an array of strings. No
+  provider is called until that passes.
+- **Integration ids go through an allowlist.** The browser sends ids like
+  `stripe`. The server looks each one up and only the name it owns ends up in the
+  prompt. An id that isn't on the list returns a 400, so a random string can
+  never reach the model.
+- **Instructions and user text stay separate,** the same way for both providers.
+  My instructions go in OpenAI's `instructions` and Gemini's `systemInstruction`.
+  The user's text goes in OpenAI's `input` and Gemini's `contents`.
+- **Output is rendered as text,** with `white-space: pre-wrap`. No
+  `dangerouslySetInnerHTML` and no Markdown renderer.
+- **Errors don't leak.** Provider errors are logged as a short summary and the
+  browser gets one of a fixed set of messages I wrote. No stack traces, no SDK
+  objects, no env values.
