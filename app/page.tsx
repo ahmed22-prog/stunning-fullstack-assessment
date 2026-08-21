@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { INTEGRATIONS } from "@/lib/integrations";
 import { PROMPT_MAX_LENGTH } from "@/lib/validation";
 
@@ -17,8 +17,16 @@ export default function Home() {
     "idle",
   );
 
+  // `status` lags a synchronous burst of clicks by a render, so it cannot guard
+  // against double submits on its own. This ref flips immediately.
+  const inFlight = useRef(false);
+
+  // The server validates the *trimmed* prompt, so the counter and the limit
+  // check have to use the same number. Measuring raw length here used to block
+  // input the API would have accepted, e.g. a full-length paste ending in a
+  // newline.
   const trimmedLength = prompt.trim().length;
-  const isTooLong = prompt.length > PROMPT_MAX_LENGTH;
+  const isTooLong = trimmedLength > PROMPT_MAX_LENGTH;
   const canSubmit = trimmedLength > 0 && !isTooLong && status !== "loading";
 
   const selectedNames = useMemo(
@@ -26,6 +34,16 @@ export default function Home() {
       INTEGRATIONS.filter((i) => selectedIds.includes(i.id)).map((i) => i.name),
     [selectedIds],
   );
+
+  function handlePromptChange(value: string) {
+    setPrompt(value);
+    // A failed attempt is about the text the user just changed, so stop showing
+    // it. A successful plan stays put — they are probably still reading it.
+    if (status === "error") {
+      setStatus("idle");
+      setError(null);
+    }
+  }
 
   function toggleIntegration(id: string) {
     setSelectedIds((current) =>
@@ -36,7 +54,8 @@ export default function Home() {
   }
 
   async function handleGenerate() {
-    if (!canSubmit) return;
+    if (!canSubmit || inFlight.current) return;
+    inFlight.current = true;
 
     setStatus("loading");
     setError(null);
@@ -79,6 +98,8 @@ export default function Home() {
       );
       setCanRetry(true);
       setStatus("error");
+    } finally {
+      inFlight.current = false;
     }
   }
 
@@ -127,10 +148,13 @@ export default function Home() {
           <textarea
             id="prompt"
             value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
+            dir="auto"
+            onChange={(event) => handlePromptChange(event.target.value)}
             onKeyDown={(event) => {
               if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                 event.preventDefault();
+                // Holding the shortcut auto-repeats; one press means one plan.
+                if (event.repeat) return;
                 void handleGenerate();
               }
             }}
@@ -154,7 +178,7 @@ export default function Home() {
                 isTooLong ? "font-medium text-danger" : "text-ink-subtle"
               }
             >
-              {prompt.length.toLocaleString()} /{" "}
+              {trimmedLength.toLocaleString()} /{" "}
               {PROMPT_MAX_LENGTH.toLocaleString()}
             </span>
           </div>
@@ -254,14 +278,14 @@ export default function Home() {
 
           {status === "success" && result && (
             <article className="overflow-hidden rounded-2xl border border-border-subtle bg-surface">
-              <div className="flex items-center justify-between gap-4 border-b border-border-subtle px-5 py-3.5 sm:px-6">
+              <div className="flex items-center justify-between gap-4 border-b border-border-subtle px-5 py-2 sm:px-6">
                 <h2 className="text-sm font-semibold text-ink">
                   Your build plan
                 </h2>
                 <button
                   type="button"
                   onClick={handleCopy}
-                  className="rounded-lg border border-border-subtle px-2.5 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:border-border-strong hover:text-ink"
+                  className="inline-flex min-h-11 min-w-16 items-center justify-center rounded-lg border border-border-subtle px-3 text-xs font-medium text-ink-muted transition-colors hover:border-border-strong hover:text-ink"
                 >
                   {copyState === "copied"
                     ? "Copied"
@@ -271,7 +295,10 @@ export default function Home() {
                 </button>
               </div>
               <div className="px-5 py-5 sm:px-6 sm:py-6">
-                <p className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink-muted [overflow-wrap:anywhere]">
+                <p
+                  dir="auto"
+                  className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink-muted [overflow-wrap:anywhere]"
+                >
                   {result}
                 </p>
               </div>
